@@ -1,10 +1,8 @@
 process variantRecalibrator {
 
-    if (params.platform == 'local') {
-        label 'process_low'
-    } else if (params.platform == 'cloud') {
-        label 'process_medium'
-    }
+
+    label 'process_low'
+
     container 'broadinstitute/gatk:4.6.1.0'
 
     tag "$vcf"
@@ -12,7 +10,7 @@ process variantRecalibrator {
     publishDir("$params.outdir/VCF", mode: "copy")
 
     input:
-    tuple val(sample_id), file(vcf), file(vcfIndex)
+    tuple val(sample_id), file(vcf)
     val knownSitesArgs
     path genome
     path qsrc_vcf
@@ -27,10 +25,16 @@ process variantRecalibrator {
     """
     echo "Running VQSR"
 
-    if [[ -n "${params.genome_file}" ]]; then
-        genomeFasta=\$(basename ${params.genome_file})
-    else
-        genomeFasta=\$(find -L . -name '*.fasta')
+     genomeFasta=\$(find -L . -name '*.fasta' | head -1)
+
+    # Create dict if not present
+    if [ ! -f "\${genomeFasta%.fasta}.dict" ]; then
+        gatk CreateSequenceDictionary -R "\${genomeFasta}"
+    fi
+
+    # Index the VCF if index not present
+    if [ ! -f "${vcf}.tbi" ]; then
+        gatk IndexFeatureFile -I "${vcf}"
     fi
 
     echo "Genome File: \${genomeFasta}"

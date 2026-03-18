@@ -1,9 +1,5 @@
 process filterVCF {
-    if (params.platform == 'local') {
-        label 'process_low'
-    } else if (params.platform == 'cloud') {
-        label 'process_medium'
-    }
+    label 'process_low'
     container 'variantvalidator/gatk4:4.3.0.0'
 
     tag "$vcfFile"
@@ -20,43 +16,43 @@ process filterVCF {
     script:
     def isDegradedDNA = params.degraded_dna ? 'true' : 'false'
     """
-    echo "Running Variant Filtration for Sample: ${vcfFile}"
+    genomeFasta=\$(find -L . -name '*.fasta' | head -1)
 
-    if [[ -n "${params.genome_file}" ]]; then
-        genomeFasta=\$(basename ${params.genome_file})
-    else
-        genomeFasta=\$(find -L . -name '*.fasta')
+    # Create dict if not staged
+    if [ ! -f "\${genomeFasta%.fasta}.dict" ]; then
+        gatk CreateSequenceDictionary -R "\${genomeFasta}"
     fi
 
-    echo "Genome File: \${genomeFasta}"
-
-    if [[ -e "\${genomeFasta}.dict" ]]; then
-        mv "\${genomeFasta}.dict" "\${genomeFasta%.*}.dict"
+    # Index the VCF if index not staged
+    if [ ! -f "${vcfFile}.tbi" ]; then
+        gatk IndexFeatureFile -I "${vcfFile}"
     fi
 
-    outputVcf="\$(basename ${vcfFile} .vcf)_filtered.vcf"
+    baseName=\$(basename ${vcfFile} .gz)
+    baseName=\$(basename \${baseName} .vcf)
+    outputVcf="\${baseName}_filtered.vcf"
 
     if [ "$isDegradedDNA" == "true" ]; then
         echo "Running variant filtration for degraded DNA (2 x coverage)"
         gatk VariantFiltration -R "\${genomeFasta}" -V "${vcfFile}" -O "\${outputVcf}" \
-            --filter-name "LowQUAL" --filter-expression "float(QUAL) < 150" \
-            --filter-name "LowQD" --filter-expression "float(QD) < 2.0" \
-            --filter-name "LowCoverage" --filter-expression "DP < 5" \
-            --filter-name "HighFS" --filter-expression "float(FS) > 60.0" \
-            --filter-name "HighSOR" --filter-expression "float(SOR) > 3.0" \
-            --filter-name "LowMQ" --filter-expression "float(MQ) < 60.0" \
-            --genotype-filter-name "LowGQ" --genotype-filter-expression "GQ < 30" \
+            --filter-name "LowQUAL" --filter-expression 'QUAL < 150.0' \
+            --filter-name "LowQD" --filter-expression 'QD < 2.0' \
+            --filter-name "LowCoverage" --filter-expression 'DP < 5' \
+            --filter-name "HighFS" --filter-expression 'FS > 60.0' \
+            --filter-name "HighSOR" --filter-expression 'SOR > 3.0' \
+            --filter-name "LowMQ" --filter-expression 'MQ < 60.0' \
+            --genotype-filter-name "LowGQ" --genotype-filter-expression 'GQ < 30' \
             --set-filtered-genotype-to-no-call
     else
         echo "Running variant filtration for standard DNA (10x+ coverage)"
         gatk VariantFiltration -R "\${genomeFasta}" -V "${vcfFile}" -O "\${outputVcf}" \
-            --filter-name "LowQUAL" --filter-expression "float(QUAL) < 500" \
-            --filter-name "HighQD" --filter-expression "float(QD) < 2.0" \
-            --filter-name "LowCoverage" --filter-expression "DP < 30" \
-            --filter-name "HighFS" --filter-expression "float(FS) > 60.0" \
-            --filter-name "HighSOR" --filter-expression "float(SOR) > 3.0" \
-            --filter-name "LowMQ" --filter-expression "float(MQ) < 60.0" \
-            --genotype-filter-name "LowGQ" --genotype-filter-expression "GQ < 30" \
+            --filter-name "LowQUAL" --filter-expression 'QUAL < 500.0' \
+            --filter-name "LowQD" --filter-expression 'QD < 2.0' \
+            --filter-name "LowCoverage" --filter-expression 'DP < 30' \
+            --filter-name "HighFS" --filter-expression 'FS > 60.0' \
+            --filter-name "HighSOR" --filter-expression 'SOR > 3.0' \
+            --filter-name "LowMQ" --filter-expression 'MQ < 60.0' \
+            --genotype-filter-name "LowGQ" --genotype-filter-expression 'GQ < 30' \
             --set-filtered-genotype-to-no-call
     fi
 

@@ -14,6 +14,7 @@ log.info """\
     qsr truth vcfs  : ${params.qsrVcfs}
     output directory: ${params.outdir}
     fastqc          : ${params.fastqc}
+    trim_reads      : ${params.trim_reads}
     aligner         : ${params.aligner}
     variant caller  : ${params.variant_caller}
     bqsr            : ${params.bqsr}
@@ -30,6 +31,9 @@ if (params.index_genome) {
 if (params.fastqc) {
     include { FASTQC } from './modules/FASTQC'
 }
+
+include { TrimReads } from './modules/TrimReads'
+
 include { sortBam } from './modules/sortBam'
 include { markDuplicates } from './modules/markDuplicates'
 include { indexBam } from './modules/indexBam'
@@ -38,26 +42,38 @@ if (params.bqsr) {
 }
 include { combineGVCFs } from './modules/processGVCFs'
 include { genotypeGVCFs } from './modules/processGVCFs'
-if (params.variant_recalibration) {
-    include { variantRecalibrator } from './modules/variantRecalibrator'
-} else {
-    include { filterVCF } from './modules/filterVCF'
-}
 if (params.identity_analysis) {
     include { identityAnalysis } from './modules/identityAnalysis'
 }
+
 if (params.aligner == 'bwa-mem') {
     include { alignReadsBwaMem } from './modules/alignReadsBwaMem'
 } else if (params.aligner == 'bwa-aln') {
     include { alignReadsBwaAln } from './modules/alignReadsBwaAln'
+} else if (params.aligner == 'bowtie2') {
+    include { alignReadsBowtie2 } from './modules/alignReadsBowtie2'
+    include { samToBam } from './modules/alignReadsBowtie2'
 } else {
-    error "Unsupported aligner: ${params.aligner}. Please specify 'bwa-mem' or 'bwa-aln'."
+    error "Unsupported aligner: ${params.aligner}. Please specify 'bwa-mem', 'bwa-aln' or 'bowtie2'."
 }
+
 if (params.variant_caller == 'haplotype-caller') {
     include { haplotypeCaller } from './modules/haplotypeCaller'
+} else if (params.variant_caller == 'deepvariant') {
+    include { deepVariant } from './modules/deepVariant'
 } else {
-    error "Unsupported variant caller: ${params.variant_caller}. Please specify 'haplotype-caller'."
+    error "Unsupported variant caller: ${params.variant_caller}. Please specify 'haplotype-caller' or 'deepvariant'."
 }
+
+if (params.variant_recalibration) {
+    include { variantRecalibrator } from './modules/variantRecalibrator'
+} else if (params.variant_caller == 'deepvariant') {
+    include { filterdeepvariantVCF } from './modules/filterdeepvariantVCF'
+} else {
+    include { filterVCF } from './modules/filterVCF'
+}
+
+
 
 if (params.degraded_dna) {
     include { mapDamage2 } from './modules/mapDamage'
@@ -74,6 +90,7 @@ workflow {
     else {
         indexed_genome_ch = Channel.fromPath(params.genome_index_files)
     }
+
 
     // Create qsrc_vcf_ch channel
     qsrc_vcf_ch = Channel.fromPath(params.qsrVcfs)
@@ -98,11 +115,28 @@ workflow {
         FASTQC(read_pairs_ch)
     }
 
-    // Align reads to the indexed genome
+    // Trim reads
+    if (params.trim_reads) {
+        trimmed_ch = TrimReads(read_pairs_ch).trimmed_reads
+            .map { sample_id, r1, r2 -> tuple(sample_id, [r1, r2]) }
+    } else {
+        trimmed_ch = read_pairs_ch
+    }
+
+    // Load correct genome index based on aligner
+    if (params.aligner == 'bowtie2') {
+        align_index_ch = Channel.fromPath(params.genome_index_bowtie2)
+    } else {
+        align_index_ch = indexed_genome_ch
+    }
+
     if (params.aligner == 'bwa-mem') {
-        align_ch = alignReadsBwaMem(read_pairs_ch, indexed_genome_ch.collect())
+        align_ch = alignReadsBwaMem(trimmed_ch, align_index_ch.collect())
     } else if (params.aligner == 'bwa-aln') {
-        align_ch = alignReadsBwaAln(read_pairs_ch, indexed_genome_ch.collect())
+        align_ch = alignReadsBwaAln(trimmed_ch, align_index_ch.collect())
+    } else if (params.aligner == 'bowtie2') {
+        sam_ch = alignReadsBowtie2(trimmed_ch, align_index_ch.collect())
+        align_ch = samToBam(sam_ch)
     }
 
     // Sort BAM files
@@ -139,49 +173,67 @@ workflow {
         bqsr_ch = mapDamage_ch
     }
 
-    // Run HaplotypeCaller on BQSR files
     if (params.variant_caller == "haplotype-caller") {
-        gvcf_ch = haplotypeCaller(bqsr_ch, indexed_genome_ch.collect()).collect()
+
+    gvcf_ch = haplotypeCaller(bqsr_ch, indexed_genome_ch.collect())
+
+    // Skip combineGVCFs — pass single sample GVCF directly to genotypeGVCFs
+    final_vcf_ch = genotypeGVCFs(
+        gvcf_ch.map { sample_id, vcf, idx -> tuple(sample_id, vcf, idx) },
+        indexed_genome_ch.collect()
+    )
+
+    } else if (params.variant_caller == "deepvariant") {
+
+    dv_ch = deepVariant(bqsr_ch, indexed_genome_ch.collect())
+
+    if (params.variant_recalibration) {
+        // Route GVCF through combine/genotype steps for VQSR
+        all_gvcf_ch = dv_ch
+            .map { sample_id, vcf, gvcf -> tuple(sample_id, gvcf, file("${gvcf}.tbi")) }
+            .collect()
+            .map { items ->
+                def sample_ids   = items.collate(3).collect { it[0] }
+                def gvcf_files   = items.collate(3).collect { it[1] }
+                def gvcf_indexes = items.collate(3).collect { it[2] }
+                tuple(sample_ids, gvcf_files, gvcf_indexes)
+            }
+
+        combined_gvcf_ch = combineGVCFs(all_gvcf_ch, indexed_genome_ch.collect())
+        final_vcf_ch     = genotypeGVCFs(combined_gvcf_ch, indexed_genome_ch.collect())
+
+    } else {
+        // Use VCF directly for hard filtering
+        final_vcf_ch = dv_ch.map { sample_id, vcf, gvcf -> tuple(sample_id, vcf, file("${vcf}.tbi")) }
     }
 
-    // Now we map to create separate lists for sample IDs, VCF files, and index files
-    all_gvcf_ch = gvcf_ch
-        .collect { listOfTuples ->
-            def sample_ids = listOfTuples.collate(3).collect { it[0] }   // Collect sample IDs from every 3rd element
-            def vcf_files = listOfTuples.collate(3).collect { it[1] }    // Collect VCF files
-            def vcf_index_files = listOfTuples.collate(3).collect { it[2] } // Collect VCF index files
-            return tuple(sample_ids, vcf_files, vcf_index_files)
-        }
 
-    // Combine GVCFs
-    combined_gvcf_ch = combineGVCFs(all_gvcf_ch, indexed_genome_ch.collect())
-
-    // Run GenotypeGVCFs
-    final_vcf_ch = genotypeGVCFs(combined_gvcf_ch, indexed_genome_ch.collect())
+    } else {
+        error "Unsupported variant caller: ${params.variant_caller}"
+    }
 
     // Conditionally apply variant recalibration or filtering
     if (params.variant_recalibration) {
-        // Define a map of VCF files to resource options
         def resourceOptions = [
-            'Homo_sapiens_assembly38.known_indels': 'known=true,training=false,truth=false,prior=15.0',  // High-priority known indels, not used for training
-            'hapmap_3.3.hg38': 'known=false,training=false,truth=true,prior=15.0',  // Good for truth, not training
-            '1000G_omni2.5.hg38': 'known=false,training=true,truth=false,prior=12.0',  // Omni SNPs, used for training
-            '1000G_phase1.snps.high_confidence.hg38': 'known=true,training=true,truth=true,prior=10.0',  // High confidence SNPs, both for training and truth
-            'Homo_sapiens_assembly38.dbsnp138': 'known=true,training=false,truth=false,prior=2.0',  // dbSNP, known but not for training
-            'Mills_and_1000G_gold_standard.indels.hg38': 'known=true,training=true,truth=true,prior=12.0'  // Gold standard indels, good for truth (indels)
+            'Homo_sapiens_assembly38.known_indels': 'known=true,training=false,truth=false,prior=15.0',
+            'hapmap_3.3.hg38': 'known=false,training=false,truth=true,prior=15.0',
+            '1000G_omni2.5.hg38': 'known=false,training=true,truth=false,prior=12.0',
+            '1000G_phase1.snps.high_confidence.hg38': 'known=true,training=true,truth=true,prior=10.0',
+            'Homo_sapiens_assembly38.dbsnp138': 'known=true,training=false,truth=false,prior=2.0',
+            'Mills_and_1000G_gold_standard.indels.hg38': 'known=true,training=true,truth=true,prior=12.0'
         ]
-
-        // Generate --resource arguments
         knownSitesArgs_ch = Channel
             .fromPath(params.qsrVcfs)
             .filter { file -> file.getName().endsWith('.vcf.gz') || file.getName().endsWith('.vcf') }
             .map { file ->
-                def baseName = file.getName().replaceAll(/\.vcf(\.gz)?$/, '') // Remove .vcf.gz or .vcf
-                def resourceArgs = resourceOptions.get(baseName) ?: "" // Get attributes from resourceOptions
-                return "--resource:${baseName},${resourceArgs} ${file.getName()}" // Only the filename, no full path
+                def baseName = file.getName().replaceAll(/\.vcf(\.gz)?$/, '')
+                def resourceArgs = resourceOptions.get(baseName) ?: ""
+                return "--resource:${baseName},${resourceArgs} ${file.getName()}"
             }
             .collect()
-        filtered_vcf_ch = variantRecalibrator(final_vcf_ch, knownSitesArgs_ch, indexed_genome_ch.collect(), qsrc_vcf_ch.collect())
+        filtered_vcf_ch = variantRecalibrator(final_vcf_ch.map { sample_id, vcf, idx -> tuple(sample_id, vcf) }, knownSitesArgs_ch, indexed_genome_ch.collect(), qsrc_vcf_ch.collect())
+    } else if (params.variant_caller == "deepvariant") {
+        filtered_vcf_ch = filterdeepvariantVCF(final_vcf_ch)
     } else {
         filtered_vcf_ch = filterVCF(final_vcf_ch, indexed_genome_ch.collect())
     }
@@ -254,6 +306,89 @@ workflow FASTQC_only {
     }
 }
 
+workflow TrimReads_only {
+    read_pairs_ch = Channel
+        .fromPath(params.samplesheet)
+        .splitCsv(sep: '\t')
+        .map { row ->
+            if (row.size() == 4) {
+                tuple(row[0], [row[1], row[2]])
+            } else if (row.size() == 3) {
+                tuple(row[0], [row[1]])
+            } else {
+                error "Unexpected row format in samplesheet: $row"
+            }
+        }
+
+    TrimReads(read_pairs_ch)
+}
+
 workflow.onComplete {
     log.info ( workflow.success ? "\nworkflow is done!\n" : "Oops .. something went wrong" )
 }
+
+workflow Align_only {
+
+    // Set channel to gather read_pairs from the samplesheet
+    // This reads the TSV samplesheet and maps each row into a tuple of (sample_id, [read1, read2])
+    // Same pattern used across all isolated workflows for consistency
+    read_pairs_ch = Channel
+        .fromPath(params.samplesheet)
+        .splitCsv(sep: '\t')
+        .map { row ->
+            tuple(row[0], [row[1], row[2]])
+            }
+
+    // Load the indexed genome files from the results directory
+    indexed_genome_ch = Channel.fromPath(params.genome_index_files)
+
+    // If trim_reads = true in nextflow.config, fastp will run first
+    // If trim_reads = false, raw reads are passed straight through to alignment
+    if (params.trim_reads) {
+        // Run fastp trimming - trimmed_ch will contain the cleaned reads
+        trimmed_ch = TrimReads(read_pairs_ch).trimmed_reads
+            .map { sample_id, r1, r2 -> tuple(sample_id, [r1, r2]) }
+    } else {
+        // Skip trimming - pass raw reads directly to alignment
+        trimmed_ch = read_pairs_ch
+    }
+
+    // Load correct genome index based on aligner
+    if (params.aligner == 'bowtie2') {
+        indexed_genome_ch = Channel.fromPath(params.genome_index_bowtie2)
+    } else {
+        indexed_genome_ch = Channel.fromPath(params.genome_index_files)
+    }
+
+    // Align trimmed (or raw) reads to the indexed genome
+    // The aligner is determined by params.aligner in nextflow.config
+    // indexed_genome_ch.collect() gathers all genome index files into a single list
+    // so they are all available to the aligner process at once
+    if (params.aligner == 'bwa-mem') {
+        alignReadsBwaMem(trimmed_ch, indexed_genome_ch.collect())
+    } else if (params.aligner == 'bwa-aln') {
+        alignReadsBwaAln(trimmed_ch, indexed_genome_ch.collect())
+    } else if (params.aligner == 'bowtie2') {
+        sam_ch = alignReadsBowtie2(trimmed_ch, indexed_genome_ch.collect())
+        samToBam(sam_ch)
+    }
+}
+
+workflow VariantCall_only {
+
+    // Load indexed genome files
+    indexed_genome_ch = Channel.fromPath(params.genome_index_files)
+
+    // Load BAM files from aligned_reads directory
+    bam_ch = Channel
+        .fromPath("$params.outdir/aligned_reads/*.bam")
+        .map { bam -> tuple(bam.baseName, bam, file("${bam}.bai")) }
+
+    // Run selected variant caller
+    if (params.variant_caller == "haplotype-caller") {
+        gvcf_ch = haplotypeCaller(bam_ch, indexed_genome_ch.collect()).collect()
+    } else if (params.variant_caller == "deepvariant") {
+        gvcf_ch = deepVariant(bam_ch, indexed_genome_ch.collect()).collect()
+    }
+}
+

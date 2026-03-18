@@ -56,10 +56,10 @@ process genotypeGVCFs {
     """
     echo "Genotyping combined GVCF: ${combined_gvcf.baseName}"
 
-    if [[ -n ${params.genome_file} ]]; then
-        genomeFasta=\$(basename ${params.genome_file})
-    else
-        genomeFasta=\$(find -L . -name '*.fasta')
+    genomeFasta=\$(find -L . -name '*.fasta' | head -1)
+
+    if [ ! -f "\${genomeFasta%.fasta}.dict" ]; then
+        gatk CreateSequenceDictionary -R "\${genomeFasta}"
     fi
 
     echo "Genome File: \${genomeFasta}"
