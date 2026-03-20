@@ -1,5 +1,5 @@
 process alignReadsBowtie2 {
-    container 'biocontainers/bowtie2:v2.4.1_cv1'
+    container 'staphb/bowtie2:2.4.4'
     
     input:
     tuple val(sample_id), path(reads)
