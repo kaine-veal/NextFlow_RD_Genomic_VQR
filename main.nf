@@ -134,7 +134,7 @@ workflow {
     } else if (params.aligner == 'bwa-aln') {
         align_ch = alignReadsBwaAln(trimmed_ch, align_index_ch.collect())
     } else if (params.aligner == 'bowtie2') {
-        sam_ch = alignReadsBowtie2(trimmed_ch, align_index_ch.collect())
+        align_ch = alignReadsBowtie2(trimmed_ch, align_index_ch.collect())
     }
 
     // Sort BAM files
