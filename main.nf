@@ -52,7 +52,6 @@ if (params.aligner == 'bwa-mem') {
     include { alignReadsBwaAln } from './modules/alignReadsBwaAln'
 } else if (params.aligner == 'bowtie2') {
     include { alignReadsBowtie2 } from './modules/alignReadsBowtie2'
-    include { samToBam } from './modules/alignReadsBowtie2'
 } else {
     error "Unsupported aligner: ${params.aligner}. Please specify 'bwa-mem', 'bwa-aln' or 'bowtie2'."
 }
@@ -136,7 +135,6 @@ workflow {
         align_ch = alignReadsBwaAln(trimmed_ch, align_index_ch.collect())
     } else if (params.aligner == 'bowtie2') {
         sam_ch = alignReadsBowtie2(trimmed_ch, align_index_ch.collect())
-        align_ch = samToBam(sam_ch)
     }
 
     // Sort BAM files
