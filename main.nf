@@ -189,7 +189,7 @@ workflow {
     if (params.variant_recalibration) {
         // Route GVCF through combine/genotype steps for VQSR
         all_gvcf_ch = dv_ch
-            .map { sample_id, vcf, gvcf -> tuple(sample_id, gvcf, file("${gvcf}.tbi")) }
+            .map { sample_id, vcf, tbi, gvcf, gtbi -> tuple(sample_id, gvcf, gtbi) }
             .collect()
             .map { items ->
                 def sample_ids   = items.collate(3).collect { it[0] }
@@ -203,7 +203,7 @@ workflow {
 
     } else {
         // Use VCF directly for hard filtering
-        final_vcf_ch = dv_ch.map { sample_id, vcf, tbi, gvcf, gtbi -> tuple(sample_id, gvcf, gtbi) }
+        final_vcf_ch = dv_ch.map { sample_id, vcf, tbi, gvcf, gtbi -> tuple(sample_id, vcf, tbi) }
     }
 
 
