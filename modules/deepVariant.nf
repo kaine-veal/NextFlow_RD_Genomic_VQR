@@ -13,7 +13,7 @@ process deepVariant {
     path indexFiles
 
     output:
-    tuple val(sample_id), path("${sample_id}.vcf.gz"), path("${sample_id}.g.vcf.gz")
+    tuple val(sample_id), path("${sample_id}.vcf.gz"), path("${sample_id}.vcf.gz.tbi"), path("${sample_id}.g.vcf.gz"), path("${sample_id}.g.vcf.gz.tbi")
 
     script:
     """

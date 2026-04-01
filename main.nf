@@ -163,8 +163,9 @@ workflow {
         .collect()
 
     if (params.bqsr) {
-        // Run BQSR on indexed BAM files
+        // Run BQSR on indexed BAM files; slice output to (sample_id, bam, bai) for downstream variant callers
         bqsr_ch = baseRecalibrator(mapDamage_ch, knownSites_ch, indexed_genome_ch.collect(), qsrc_vcf_ch.collect())
+            .map { sample_id, bam, bai, pre_table, post_table, pdf -> tuple(sample_id, bam, bai) }
 
     } else {
         // If BQSR is skipped, just pass through the mapDamage_ch channel
@@ -202,7 +203,7 @@ workflow {
 
     } else {
         // Use VCF directly for hard filtering
-        final_vcf_ch = dv_ch.map { sample_id, vcf, gvcf -> tuple(sample_id, vcf, file("${vcf}.tbi")) }
+        final_vcf_ch = dv_ch.map { sample_id, vcf, tbi, gvcf, gtbi -> tuple(sample_id, gvcf, gtbi) }
     }
 
 
